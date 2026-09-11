@@ -1,0 +1,497 @@
+<!DOCTYPE html>
+<html lang="ro">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ASP Exam Checker</title>
+<style>
+  :root{
+    --bg:#10151d; --panel:#1a2332; --panel2:#141b28; --line:#26324a;
+    --text:#dbe4f0; --muted:#8494ad; --accent:#2196F3; --green:#4CAF50;
+    --red:#F44336; --console-bg:#0d0d0d; --console-fg:#00ff41;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--text);
+       font:14px/1.45 "Segoe UI",Arial,sans-serif}
+  .wrap{max-width:1180px;margin:0 auto;padding:16px;display:grid;
+        grid-template-columns:1fr 1fr;grid-template-rows:auto 1fr auto;
+        gap:14px;height:100vh}
+  h1{grid-column:1/-1;margin:0;font-size:18px;letter-spacing:.06em}
+  h1 small{color:var(--muted);font-weight:normal;margin-left:10px;font-size:12px}
+  .panel{background:var(--panel);border:1px solid var(--line);border-radius:10px;
+         display:flex;flex-direction:column;min-height:0}
+  .panel>h2{margin:0;padding:10px 14px;font-size:12px;letter-spacing:.12em;
+            color:var(--muted);border-bottom:1px solid var(--line)}
+  .scroll{overflow-y:auto;padding:12px 14px;flex:1}
+  label{display:block;font-size:11px;color:var(--muted);margin:10px 0 3px}
+  input[type=text],input[type=password],select{
+    width:100%;background:var(--panel2);border:1px solid var(--line);
+    border-radius:6px;color:var(--text);padding:7px 9px;font-size:13px}
+  input:focus,select:focus{outline:none;border-color:var(--accent)}
+  .row{display:flex;gap:10px}.row>div{flex:1}
+  .row.small>div{flex:0 0 70px}
+  .checks{display:grid;grid-template-columns:1fr 1fr;gap:2px 10px;margin-top:4px}
+  .checks.one{grid-template-columns:1fr}
+  .check{display:flex;align-items:center;gap:7px;font-size:12.5px;padding:3px 0;cursor:pointer}
+  .check input{accent-color:var(--accent);width:15px;height:15px}
+  .divider{margin:16px 0 4px;font-size:11px;letter-spacing:.12em;color:var(--muted);
+           border-top:1px solid var(--line);padding-top:12px;font-weight:bold}
+  .hint{font-size:11.5px;color:var(--muted);margin:4px 0 2px;line-height:1.4}
+  .tgbox{background:var(--panel2);border:1px solid var(--line);border-radius:8px;
+         padding:10px 12px;margin-top:6px;font-size:12.5px;line-height:1.5}
+  .tgbox .ok{color:var(--green);font-weight:600}
+  .tgbox .warn{color:#ffb74d;font-weight:600}
+  .tgbox a.tglink{display:block;text-align:center;background:#229ED9;color:#fff;
+                  text-decoration:none;border-radius:7px;padding:9px 12px;
+                  font-weight:600;margin:8px 0 6px}
+  .tgbox button{background:none;border:1px solid var(--line);color:var(--muted);
+                padding:5px 10px;font-size:11px;font-weight:500}
+  .tgbox code{background:#0c1119;border:1px solid var(--line);border-radius:4px;
+              padding:1px 5px;font-size:11.5px;user-select:all}
+  button{border:none;border-radius:7px;color:#fff;padding:10px 16px;
+         font-size:13px;font-weight:600;cursor:pointer}
+  button:disabled{opacity:.5;cursor:default}
+  .btn-save{background:var(--green);width:100%;margin-top:14px}
+  .btn-toggle{background:var(--accent);flex:1;height:44px;font-size:14px}
+  .btn-toggle.running{background:var(--red)}
+  #console{background:var(--console-bg);color:var(--console-fg);flex:1;
+           font:11.5px/1.5 "Courier New",monospace;padding:10px;margin:10px;
+           border-radius:6px;overflow-y:auto;white-space:pre-wrap;word-break:break-word}
+  .controls{grid-column:1/-1;display:flex;align-items:center;gap:18px;
+            background:var(--panel);border:1px solid var(--line);
+            border-radius:10px;padding:10px 14px}
+  .status{display:flex;align-items:center;gap:8px;font-size:13px}
+  .dot{width:10px;height:10px;border-radius:50%;background:var(--red)}
+  .dot.on{background:var(--green)}
+  #toast{position:fixed;bottom:18px;left:50%;transform:translateX(-50%);
+         background:#000c;color:#fff;padding:8px 16px;border-radius:8px;
+         font-size:13px;opacity:0;transition:opacity .25s;pointer-events:none}
+  #authOverlay{position:fixed;inset:0;background:var(--bg);display:none;
+               align-items:center;justify-content:center;z-index:50}
+  #authOverlay.show{display:flex}
+  .auth-box{background:var(--panel);border:1px solid var(--line);border-radius:12px;
+            padding:26px;width:min(340px,90vw);display:flex;flex-direction:column;gap:10px}
+  .auth-box h2{margin:0 0 4px;font-size:15px;letter-spacing:.08em;text-align:center}
+  .auth-tabs{display:flex;gap:8px}
+  .auth-tabs button{flex:1;background:var(--panel2);border:1px solid var(--line);
+                    color:var(--muted);padding:8px}
+  .auth-tabs button.active{background:var(--accent);color:#fff;border-color:var(--accent)}
+  .auth-box input{background:var(--panel2);border:1px solid var(--line);border-radius:6px;
+                  color:var(--text);padding:9px 10px;font-size:14px}
+  #authSubmit{background:var(--green)}
+  #authMsg{font-size:12px;color:#ff8a80;min-height:16px;text-align:center}
+  #whoami{margin-left:auto;font-size:12px;color:var(--muted)}
+  #whoami b{color:var(--text)}
+  #logoutBtn{background:none;border:1px solid var(--line);color:var(--muted);
+             padding:4px 10px;font-size:11px;margin-left:8px}
+  @media(max-width:860px){.wrap{grid-template-columns:1fr;height:auto}
+    #console{min-height:300px}}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1 style="display:flex;align-items:center">ASP EXAM CHECKER <small>monitor programari examen DECA</small>
+    <span id="whoami"></span><button id="logoutBtn" onclick="logout()" style="display:none">Iesire</button></h1>
+
+  <div class="panel">
+    <h2>SETARI</h2>
+    <div class="scroll">
+      <label>IDNP</label>
+      <input type="text" id="idnp" placeholder="Ex: 1234567890123">
+      <div class="row">
+        <div><label>Prenume</label><input type="text" id="first_name" placeholder="Prenume"></div>
+        <div><label>Nume</label><input type="text" id="last_name" placeholder="Nume"></div>
+      </div>
+      <div class="row">
+        <div><label>Telefon</label><input type="text" id="phone" placeholder="07xxxxxxxx"></div>
+        <div><label>Email</label><input type="text" id="email" placeholder="email@example.com"></div>
+      </div>
+      <label>Seria/Nr. buletin</label>
+      <input type="text" id="id_series" placeholder="Ex: A12345678">
+      <label>Data buletin (zi / luna / an)</label>
+      <div class="row small">
+        <div><input type="text" id="id_date_day" placeholder="ZZ"></div>
+        <div><input type="text" id="id_date_month" placeholder="LL"></div>
+        <div><input type="text" id="id_date_year" placeholder="AAAA"></div>
+      </div>
+      <label>Certificat medical</label>
+      <input type="text" id="medical_cert" placeholder="Ex: 12345/6789">
+
+      <div class="divider">TELEGRAM</div>
+      <div id="tgBox" class="tgbox"></div>
+      <label>Interval verificare (minute)</label>
+      <input type="text" id="interval_minutes" placeholder="5">
+      <div class="hint">Scanarea e comuna tuturor utilizatorilor porniti: ea merge
+        la cel mai mic interval cerut dintre ei.</div>
+
+      <div class="divider">LUNI VERIFICARE</div>
+      <div class="checks" id="months"></div>
+
+      <div class="divider">LOCATII PENTRU NOTIFICARI</div>
+      <div class="hint">Toate cele 3 locatii sunt scanate mereu. Primesti
+        notificari doar pentru cele bifate aici.</div>
+      <div class="checks one" id="locations"></div>
+
+      <div class="divider">AUTO-UPDATE PROGRAMARE</div>
+      <label class="check"><input type="checkbox" id="auto_update_enabled">
+        Activeaza auto-update programare</label>
+      <label>IDNP auto-update (gol = la fel ca scraping)</label>
+      <input type="text" id="auto_update_idnp" placeholder="Lasa gol pentru IDNP-ul de mai sus">
+      <label>Codul programarii (APO...)</label>
+      <input type="text" id="appointment_code" placeholder="APO0126...">
+      <label>Numarul cererii</label>
+      <input type="text" id="request_number" placeholder="3003...">
+      <label>Locatie tinta (auto-update)</label>
+      <select id="target_location"></select>
+      <label>Mod auto-update</label>
+      <select id="auto_update_mode">
+        <option value="earlier">Doar mai devreme decat programarea curenta</option>
+        <option value="any">Muta in lunile alese (chiar mai tarziu, apoi doar mai devreme)</option>
+      </select>
+      <label>Data programare curenta (zi / luna / an)</label>
+      <div class="row small">
+        <div><input type="text" id="appt_day" placeholder="ZZ"></div>
+        <div><input type="text" id="appt_month" placeholder="LL"></div>
+        <div><input type="text" id="appt_year" placeholder="AAAA"></div>
+      </div>
+
+      <div class="divider">PRIMA PROGRAMARE (CERERE NOUA)</div>
+      <div class="hint">Daca ai depus cererea si ai platit, dar inca NU ai o
+        programare, lipeste aici linkul primit de la ASP. Cand apare un loc
+        liber in lunile alese mai sus, te programez automat si iti trimit
+        codul pe Telegram. Nu folosi asta daca ai deja o programare — pentru
+        aia e auto-update-ul de mai sus.</div>
+      <label class="check"><input type="checkbox" id="first_booking_enabled">
+        Prinde automat primul loc liber</label>
+      <label>Link cerere (.../cerere/APO01/...)</label>
+      <input type="text" id="first_booking_url"
+             placeholder="https://eservicii.gov.md/asp/dimtcca/cerere/APO01/...">
+      <button class="btn-save" onclick="probeCerere()">[VERIFICA LINKUL]</button>
+      <div class="hint" id="first_booking_status">Linkul trebuie verificat o
+        data inainte de pornire.</div>
+
+      <button class="btn-save" onclick="save(true)">[SALVEAZA]</button>
+    </div>
+  </div>
+
+  <div class="panel">
+    <h2>CONSOLA</h2>
+    <div id="console"></div>
+  </div>
+
+  <div class="controls">
+    <button class="btn-toggle" id="toggle" onclick="toggleMonitor()">[&gt;] PORNESTE MONITORUL</button>
+    <div class="status"><div class="dot" id="dot"></div><span id="statusText">Oprit</span></div>
+  </div>
+</div>
+<div id="toast"></div>
+
+<div id="authOverlay">
+  <div class="auth-box">
+    <h2>ASP EXAM CHECKER</h2>
+    <div class="auth-tabs">
+      <button id="tabLogin" class="active" onclick="setAuthMode('login')">Intra in cont</button>
+      <button id="tabRegister" onclick="setAuthMode('register')">Cont nou</button>
+    </div>
+    <input id="auth_user" placeholder="Utilizator" autocomplete="username">
+    <input id="auth_pass" type="password" placeholder="Parola" autocomplete="current-password">
+    <input id="auth_code" placeholder="Cod invitatie" style="display:none">
+    <button id="authSubmit" onclick="submitAuth()">Intra</button>
+    <div id="authMsg"></div>
+  </div>
+</div>
+
+<script>
+const MONTHS = ["ianuarie","februarie","martie","aprilie","mai","iunie",
+                "iulie","august","septembrie","octombrie","noiembrie","decembrie"];
+let LOCATIONS = [];
+let running = false;
+let sharedUsers = 0;
+let tgTick = 0;
+let logNext = 0;
+let cfgRev = 0; // versiunea setarilor incarcate - garda anti-tab-vechi
+let token = localStorage.getItem("asp_token") || "";
+let authMode = "login";
+
+function toast(msg){
+  const t = document.getElementById("toast");
+  t.textContent = msg; t.style.opacity = 1;
+  clearTimeout(t._h); t._h = setTimeout(()=>t.style.opacity=0, 2600);
+}
+
+async function api(path, body){
+  const opts = {headers:{"X-Auth": token}};
+  if(body !== undefined){
+    opts.method = "POST";
+    opts.headers["Content-Type"] = "application/json";
+    opts.body = JSON.stringify(body);
+  }
+  const r = await fetch(path, opts);
+  if(r.status === 401){
+    showAuth();
+    throw new Error("unauthorized");
+  }
+  return r.json();
+}
+
+function showAuth(){ document.getElementById("authOverlay").classList.add("show"); }
+function hideAuth(){ document.getElementById("authOverlay").classList.remove("show"); }
+
+function setAuthMode(mode){
+  authMode = mode;
+  document.getElementById("tabLogin").classList.toggle("active", mode === "login");
+  document.getElementById("tabRegister").classList.toggle("active", mode === "register");
+  document.getElementById("auth_code").style.display = mode === "register" ? "" : "none";
+  document.getElementById("authSubmit").textContent = mode === "register" ? "Creeaza cont" : "Intra";
+  document.getElementById("authMsg").textContent = "";
+}
+
+async function submitAuth(){
+  const body = {username: document.getElementById("auth_user").value.trim(),
+                password: document.getElementById("auth_pass").value};
+  if(authMode === "register") body.code = document.getElementById("auth_code").value.trim();
+  const r = await fetch("/api/" + authMode, {method:"POST",
+    headers:{"Content-Type":"application/json"}, body: JSON.stringify(body)});
+  const d = await r.json();
+  if(d.ok && d.token){
+    token = d.token;
+    localStorage.setItem("asp_token", token);
+    hideAuth();
+    document.getElementById("auth_pass").value = "";
+    afterLogin(d.username);
+  }else{
+    document.getElementById("authMsg").textContent = d.message || "Eroare.";
+  }
+}
+
+function logout(){
+  token = "";
+  localStorage.removeItem("asp_token");
+  location.reload();
+}
+
+function afterLogin(username){
+  $("whoami").innerHTML = "cont: <b>" + username + "</b>";
+  $("logoutBtn").style.display = "";
+  loadApp();
+}
+document.getElementById("auth_pass").addEventListener("keydown",
+  e => { if(e.key === "Enter") submitAuth(); });
+
+const $ = id => document.getElementById(id);
+const TEXT_FIELDS = ["idnp","first_name","last_name","phone","email","id_series",
+  "medical_cert","auto_update_idnp","appointment_code","request_number"];
+
+// ── Telegram: bot comun, contul se leaga printr-un /start cu cod ──
+let tgLinked = false;
+
+function renderTelegram(tg){
+  tg = tg || {};
+  tgLinked = !!tg.linked;
+  const box = $("tgBox");
+  if(!tg.configured){
+    box.innerHTML = '<span class="warn">Botul Telegram nu e configurat pe server.</span>'
+      + '<br>Administratorul trebuie sa seteze <code>ASP_TG_TOKEN</code>.';
+    return;
+  }
+  if(tg.linked){
+    box.innerHTML = '<span class="ok">✓ Telegram conectat</span>'
+      + (tg.bot ? ' &nbsp;<span style="color:var(--muted)">@' + tg.bot + '</span>' : '')
+      + '<br>Aici primesti notificarile pentru locatiile bifate mai jos.'
+      + '<br><button onclick="unlinkTelegram()">Deconecteaza</button>';
+    return;
+  }
+  box.innerHTML = 'Nu ai unde primi notificari inca. Deschide botul si apasa START:'
+    + '<a class="tglink" target="_blank" rel="noopener" href="' + (tg.link_url || '#') + '">'
+    + 'Conecteaza Telegram' + (tg.bot ? ' (@' + tg.bot + ')' : '') + '</a>'
+    + 'Daca linkul nu se deschide, scrie botului: <code>/start ' + (tg.code || '') + '</code>'
+    + '<br><span style="color:var(--muted)">Se actualizeaza singur dupa ce apesi START.</span>';
+}
+
+async function unlinkTelegram(){
+  await api("/api/telegram/unlink", {});
+  await refreshTelegram();
+  toast("Telegram deconectat.");
+}
+
+async function refreshTelegram(){
+  try{
+    const r = await api("/api/config");
+    renderTelegram(r.telegram);
+    sharedUsers = r.shared_users || 0;
+    setRunning(r.running);
+  }catch(e){ /* reincearca la urmatorul tick */ }
+}
+
+function buildChecks(containerId, items, name){
+  $(containerId).innerHTML = items.map(it =>
+    `<label class="check"><input type="checkbox" name="${name}" value="${it}">${
+      name==="month" ? it[0].toUpperCase()+it.slice(1) : it}</label>`).join("");
+}
+
+function fillForm(cfg){
+  TEXT_FIELDS.forEach(k => $(k).value = cfg[k] || "");
+  $("id_date_day").value   = cfg.id_date_day   ?? "";
+  $("id_date_month").value = cfg.id_date_month ?? "";
+  $("id_date_year").value  = cfg.id_date_year  ?? "";
+  $("interval_minutes").value = cfg.interval_minutes ?? 5;
+  document.querySelectorAll('input[name="month"]').forEach(cb =>
+    cb.checked = (cfg.target_months||[]).includes(cb.value));
+  document.querySelectorAll('input[name="loc"]').forEach(cb =>
+    cb.checked = (cfg.scrape_locations||[]).includes(cb.value));
+  $("auto_update_enabled").checked = !!cfg.auto_update_enabled;
+  $("auto_update_mode").value = cfg.auto_update_mode === "any" ? "any" : "earlier";
+  $("target_location").value = LOCATIONS.includes(cfg.target_location)
+    ? cfg.target_location : LOCATIONS[0];
+  const parts = (cfg.current_appointment_date||"").split(".");
+  [$("appt_day").value, $("appt_month").value, $("appt_year").value] =
+    parts.length===3 ? parts : ["","",""];
+  $("first_booking_enabled").checked = !!cfg.first_booking_enabled;
+  $("first_booking_url").value = cfg.first_booking_url || "";
+  renderFirstBooking(cfg);
+}
+
+function renderFirstBooking(cfg){
+  const el = $("first_booking_status");
+  if(cfg.first_booking_result){
+    el.innerHTML = '<span class="ok">✓ Programat: ' + cfg.first_booking_result
+      + '</span><br>Cautarea s-a oprit singura. Verifica si emailul de la ASP.';
+  } else if(cfg.first_booking_svc && cfg.first_booking_loc){
+    el.innerHTML = '<span class="ok">✓ Link verificat</span> - bifeaza casuta '
+      + 'si porneste monitorul ca sa prind primul loc liber.';
+  } else {
+    el.textContent = "Linkul trebuie verificat o data inainte de pornire.";
+  }
+}
+
+async function probeCerere(){
+  const url = $("first_booking_url").value.trim();
+  if(!url){ toast("Lipeste intai linkul primit de la ASP."); return; }
+  const el = $("first_booking_status");
+  el.textContent = "Verific linkul... (pot dura ~1 minut, deschid pagina cererii)";
+  const r = await api("/api/first-booking/probe", {url});
+  if(!r || !r.ok){
+    el.innerHTML = '<span class="warn">' + ((r && r.message) || "Verificare esuata.") + '</span>';
+    return;
+  }
+  el.innerHTML = '<span class="ok">✓ Link verificat</span><br>' + r.message;
+  await loadApp();   // aducem svc/loc salvate pe server
+}
+
+function composeApptDate(){
+  const d = $("appt_day").value.trim(), m = $("appt_month").value.trim(),
+        y = $("appt_year").value.trim();
+  if(!(d && m && y)) return "";
+  const dn=+d, mn=+m, yn=+y;
+  if(!dn || !mn || !yn) return "";
+  return String(dn).padStart(2,"0")+"."+String(mn).padStart(2,"0")+"."+String(yn).padStart(4,"0");
+}
+
+function collectForm(){
+  const cfg = {};
+  TEXT_FIELDS.forEach(k => cfg[k] = $(k).value.trim());
+  cfg.id_date_day   = parseInt($("id_date_day").value)   || 1;
+  cfg.id_date_month = parseInt($("id_date_month").value) || 1;
+  cfg.id_date_year  = parseInt($("id_date_year").value)  || 2020;
+  cfg.interval_minutes = parseInt($("interval_minutes").value) || 5;
+  cfg.target_months = [...document.querySelectorAll('input[name="month"]:checked')].map(c=>c.value);
+  if(!cfg.target_months.length) cfg.target_months = ["aprilie"];
+  cfg.scrape_locations = [...document.querySelectorAll('input[name="loc"]:checked')].map(c=>c.value);
+  cfg.auto_update_enabled = $("auto_update_enabled").checked;
+  cfg.auto_update_mode = $("auto_update_mode").value;
+  cfg.target_location = $("target_location").value;
+  cfg.current_appointment_date = composeApptDate();
+  cfg.first_booking_enabled = $("first_booking_enabled").checked;
+  cfg.first_booking_url = $("first_booking_url").value.trim();
+  cfg._rev = cfgRev;
+  return cfg;
+}
+
+async function save(showToast){
+  const r = await api("/api/config", collectForm());
+  if(r && r.conflict){
+    toast(r.message || "Setari modificate in alta parte - reincarc.");
+    await loadApp();
+    return;
+  }
+  if(r && r._rev !== undefined) cfgRev = r._rev;
+  if(showToast) toast("Setari salvate ✓");
+}
+
+async function toggleMonitor(){
+  const btn = $("toggle"); btn.disabled = true;
+  try{
+    const r = running ? await api("/api/stop", {})
+                      : await api("/api/start", collectForm());
+    if(r && r.conflict){
+      toast(r.message || "Setari modificate in alta parte - reincarc.");
+      await loadApp();
+      btn.disabled = false;
+      return;
+    }
+    if(r && r._rev !== undefined) cfgRev = r._rev;
+    toast(r.message || (r.ok ? "OK" : "Eroare"));
+    setRunning(r.running);
+    refreshTelegram();
+  }catch(e){ toast("Eroare: " + e.message); }
+  btn.disabled = false;
+}
+
+function setRunning(on){
+  running = !!on;
+  const btn = $("toggle");
+  btn.textContent = running ? "[X] OPRESTE MONITORUL" : "[>] PORNESTE MONITORUL";
+  btn.classList.toggle("running", running);
+  $("dot").classList.toggle("on", running);
+  const others = Math.max(0, sharedUsers - (running ? 1 : 0));
+  $("statusText").textContent = (running ? "Pornit" : "Oprit")
+    + (others ? " · scan comun activ (+" + others + " utilizatori)" : "");
+}
+
+async function pollLogs(){
+  try{
+    const r = await api("/api/logs?since=" + logNext);
+    if(r.lines && r.lines.length){
+      const c = $("console");
+      const stick = c.scrollTop + c.clientHeight >= c.scrollHeight - 30;
+      c.textContent += r.lines.join("");
+      if(c.textContent.length > 400000) c.textContent = c.textContent.slice(-300000);
+      if(stick) c.scrollTop = c.scrollHeight;
+    }
+    logNext = r.next ?? logNext;
+    if(r.shared_users !== undefined) sharedUsers = r.shared_users;
+    setRunning(r.running);
+  }catch(e){ /* server plecat / parola gresita - reincearca la urmatorul tick */ }
+  // Cat timp contul nu e legat de bot, verifica periodic daca a apasat START
+  // in Telegram (linkarea se intampla in afara paginii).
+  if(!tgLinked && ++tgTick % 3 === 0) refreshTelegram();
+}
+
+let pollTimer = null;
+async function loadApp(){
+  const r = await api("/api/config");
+  LOCATIONS = r.locations || [];
+  buildChecks("locations", LOCATIONS, "loc");
+  $("target_location").innerHTML =
+    LOCATIONS.map(l => `<option value="${l}">${l}</option>`).join("");
+  fillForm(r.config || {});
+  cfgRev = (r.config && r.config._rev) || 0;
+  sharedUsers = r.shared_users || 0;
+  renderTelegram(r.telegram);
+  setRunning(r.running);
+  $("whoami").innerHTML = "cont: <b>" + (r.username || "") + "</b>";
+  $("logoutBtn").style.display = "";
+  $("console").textContent = ""; logNext = 0;
+  if(!pollTimer) pollTimer = setInterval(pollLogs, 1500);
+  pollLogs();
+}
+
+async function init(){
+  buildChecks("months", MONTHS, "month");
+  try{ await loadApp(); }
+  catch(e){ /* 401 -> overlay-ul de login e deja afisat */ }
+}
+init();
+</script>
+</body>
+</html>

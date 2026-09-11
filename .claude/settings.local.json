@@ -1,0 +1,19 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(mkdir -p ~/.claude/skills)",
+      "Bash(npx skills:*)",
+      "Bash(python -c \"import ast; ast.parse\\(open\\('dist/scrapper.py'\\).read\\(\\)\\); print\\('Syntax OK'\\)\")",
+      "Bash(python -c \"import ast; ast.parse\\(open\\('dist/scrapper.py'\\).read\\(\\)\\); print\\('Scrapper.py syntax OK'\\)\")",
+      "Bash(python -c \"import ast; ast.parse\\(open\\('app.py'\\).read\\(\\)\\); print\\('app.py syntax OK'\\)\")",
+      "Bash(python -c \"import ast; ast.parse\\(open\\('app.py', encoding='utf-8'\\).read\\(\\)\\); print\\('app.py syntax OK'\\)\")",
+      "Bash(python -c \"import ast; ast.parse\\(open\\('dist/scrapper.py', encoding='utf-8'\\).read\\(\\)\\); print\\('scrapper.py syntax OK'\\)\")",
+      "Bash(timeout 3 python app.py)",
+      "Bash(python -c \"import ast; ast.parse\\(open\\('app.py', encoding='utf-8'\\).read\\(\\)\\); print\\('✓ app.py syntax OK'\\)\")"
+    ]
+  },
+  "enableAllProjectMcpServers": true,
+  "enabledMcpjsonServers": [
+    "claude-flow"
+  ]
+}

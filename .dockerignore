@@ -1,0 +1,18 @@
+# Nu intra in imaginea Docker (Render) - doar aplicatia web + scrapper
+build/
+dist/ASP Exam Checker.exe
+dist/*.backup
+debug_out/
+venv/
+__pycache__/
+*.exe
+*.pkg
+*.png
+*.ico
+*.spec
+.git/
+.claude/
+credentials.json
+dist/credentials.json
+accounts.json
+users/

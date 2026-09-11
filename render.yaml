@@ -1,0 +1,18 @@
+services:
+  - type: web
+    name: asp-exam-checker
+    runtime: docker
+    plan: free
+    envVars:
+      - key: ASP_AUTOSTART
+        value: "1"
+      - key: ASP_UI_PASSWORD
+        sync: false
+      # Botul Telegram comun tuturor utilizatorilor (token de la @BotFather).
+      - key: ASP_TG_TOKEN
+        sync: false
+      # Cod de invitatie pentru conturi noi (gol = oricine poate crea cont).
+      - key: ASP_REGISTER_CODE
+        sync: false
+      - key: CREDENTIALS_JSON
+        sync: false

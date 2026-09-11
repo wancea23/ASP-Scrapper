@@ -1,0 +1,6 @@
+# Config pentru releul din worker.js (vezi comentariul din capul fisierului).
+# Deploy:  cd proxy && npx wrangler deploy
+# Secret:  npx wrangler secret put PROXY_KEY
+name = "asp-proxy"
+main = "worker.js"
+compatibility_date = "2025-01-01"
