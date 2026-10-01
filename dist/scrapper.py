@@ -1233,33 +1233,18 @@ def parse_cerere_url(url: str):
     return {"url": m.group(0), "kind": m.group(1), "request_id": m.group(2)}
 
 
-async def fetch_cerere_dates(service_hash: str, location_id: str, idnp: str = "",
-                             seria: str = "", issue_date: str = ""):
-    """Zilele libere pentru cererea data - 1 POST public, fara browser.
+async def fetch_cerere_dates(service_hash: str, location_id: str):
+    """Zilele libere pentru cererea data - 1 GET public, fara browser si fara
+    date personale.
 
-    Acelasi endpoint pe care il foloseste do_check_api, dar tintit pe serviciul
-    si locatia cu care a fost creata cererea (o cerere e legata de o singura
-    locatie). Returneaza lista de datetime sortata crescator.
-
-    2026-08-17: `qmatic/dates` cere identitatea completa in corp (serie buletin
-    + data emiterii) - vezi _read_calendar. Convertim un refuz intr-un
-    RuntimeError clar ca apelantii care prind Exception sa vada cauza reala.
-    2026-10-01: citim intai din gateway, fara identitate - vezi _read_dates_any.
+    Acelasi gateway ca scanul (vezi fetch_all_locations_dates), dar tintit pe
+    serviciul si locatia cu care a fost creata cererea (o cerere e legata de o
+    singura locatie). Returneaza lista de datetime sortata crescator.
     """
-    idnp = (idnp or FORM_DATA.get("idnp") or "").strip()
-    seria = (seria or FORM_DATA.get("id_series") or "").strip()
-    issue_date = (issue_date or _form_issue_date()).strip()
     timeout = aiohttp.ClientTimeout(total=30)
     async with aiohttp.ClientSession(timeout=timeout,
-                                     headers=_api_headers()) as session, \
-            aiohttp.ClientSession(timeout=timeout,
-                                  headers=_gateway_headers()) as gw:
-        try:
-            payload, _ = await _read_dates_any(session, gw, service_hash,
-                                               location_id, idnp, seria,
-                                               issue_date)
-        except _IdentityRejected as e:
-            raise RuntimeError(str(e))
+                                     headers=_gateway_headers()) as gw:
+        payload = await _read_calendar_gateway(gw, service_hash, location_id)
     out = []
     for item in payload or []:
         raw = (item.get("date") or "").strip()
@@ -1695,44 +1680,8 @@ def _redact(text) -> str:
     return re.sub(r"\d{13}", "<idnp>", str(text))
 
 
-class _IdentityRejected(Exception):
-    """qmatic/dates a raspuns 403: identitatea din corp (serie buletin + data
-    emiterii) lipseste sau nu valideaza pentru acest IDNP. E o eroare de
-    configurare a contului de scanare, NU o pana a site-ului si nici un blocaj
-    de IP - deci nu declanseaza backoff-ul."""
-
-
-class _RateLimited(Exception):
-    """qmatic/dates a raspuns 429: am epuizat cota de citiri a calendarului.
-
-    ⚠️ 18.08.2026 dimineata am crezut ca e RITMUL nostru (prima locatie trecea,
-    urmatoarele doua, trase spate-in-spate, luau 429) si am raspuns cu pauze
-    intre locatii. GRESIT - pauzele nu ajuta deloc.
-
-    Masurat seara, cu sonde din 3 puncte (acasa, Render, Worker):
-      * 429 vine si de ACASA, la PRIMA cerere a zilei de pe IP-ul asta;
-      * un ALT IDNP (checksum valid) de pe ACELASI IP primeste 403, nu 429;
-      * antetul Retry-After e identic pe toate cele 3 locatii si scade odata cu
-        ceasul (12927 -> 12861 -> 12758), spre 00:00 UTC (03:00 ora Chisinaului).
-    Deci limita e o COTA PE IDNP, resetata zilnic la 00:00 UTC - nu o limita pe
-    IP, nu o pana a site-ului si nu ritmul cererilor. Odata epuizata, orice
-    cerere in plus e irosita: nu prelungeste fereastra, dar nici nu intoarce
-    nimic. Singurul raspuns corect e sa numeri cate citiri incap intr-o zi si
-    sa le imparti pe toata ziua (vezi bugetul din web.py _shared_loop).
-
-    Cota e doar pe calendar: apo-request/get-appointment raspunde 200 in acelasi
-    timp in care qmatic/dates da 429, deci reprogramarea nu e blocata de ea.
-    """
-
-    def __init__(self, message, retry_after: float = 0.0):
-        super().__init__(message)
-        # Secunde pana la resetarea ferestrei, din antetul Retry-After.
-        self.retry_after = retry_after
-
-
-# Pauza intre citirile celor 3 calendare. NU are legatura cu 429 (aia e o cota
-# pe IDNP, vezi _RateLimited) - e doar bunul simt de a nu trage trei cereri in
-# aceeasi milisecunda.
+# Pauza intre citirile celor 3 calendare: bunul simt de a nu trage trei cereri
+# in aceeasi milisecunda.
 _SCAN_GAP_SECONDS = 1.5
 # Pauza de baza intre runde; creste cu numarul rundei (6s, 12s, 18s).
 _RATE_LIMIT_PAUSE = 6.0
@@ -1744,7 +1693,7 @@ _CALENDAR_ROUNDS = 4
 
 
 def iso_issue_date(day, month, year) -> str:
-    """Data emiterii buletinului in formatul cerut de qmatic/dates:
+    """Data emiterii buletinului in formatul cerut de ASP la reprogramare:
     'YYYY-MM-DDT00:00:00'. Gol daca lipseste ceva."""
     try:
         return f"{int(year):04d}-{int(month):02d}-{int(day):02d}T00:00:00"
@@ -1752,72 +1701,11 @@ def iso_issue_date(day, month, year) -> str:
         return ""
 
 
-def _form_issue_date() -> str:
-    d = FORM_DATA.get("id_date") or {}
-    return iso_issue_date(d.get("day"), d.get("month"), d.get("year"))
-
-
-async def _read_calendar(session, service_hash: str, location_id: str,
-                         idnp: str, seria: str, issue_date: str):
-    """Zilele libere la o locatie. Returneaza lista JSON a calendarului.
-
-    ISTORIC:
-      * pana in 2026-08-03: GET /qmatic/dates/<svc>/<loc>            (public)
-      * 2026-08-03: acelasi GET dar cu ?idnp=<13 cifre> obligatoriu  (public)
-      * 2026-08-17: ruta GET a DISPARUT (orice GET -> index.html al SPA-ului)
-        si calendarul e acum **POST /api/qmatic/dates**. Corpul cere acum
-        IDENTITATEA COMPLETA a solicitantului:
-            {publicServiceId, publicLocationId, idnp, seriaAndNumber, issueDate}
-        Fara serie+data emiterii (sau gresite) -> 403 Forbidden; cu ele corecte
-        -> 200 cu zilele. Poarta e VALIDAREA IDENTITATII, nu plata: valoarea lui
-        publicServiceId nu conteaza (hash-ul vechi din get-service merge la fel),
-        iar raspunsul e acelasi pentru orice identitate valida, deci un singur
-        scan partajat ramane valid. issueDate = 'YYYY-MM-DDT00:00:00'.
-        Vezi [[asp-qmatic-dates-gated-behind-wizard-2026-08-17]].
-    """
-    idnp = (idnp or "").strip()
-    seria = (seria or "").strip()
-    issue_date = (issue_date or "").strip()
-    missing = [n for n, v in (("IDNP", idnp), ("serie buletin", seria),
-                              ("data emiterii", issue_date)) if not v]
-    if missing:
-        raise _IdentityRejected("lipsesc din setarile contului de scanare: "
-                                + ", ".join(missing))
-    payload = {"publicServiceId": service_hash,
-               "publicLocationId": location_id,
-               "idnp": idnp,
-               "seriaAndNumber": seria,
-               "issueDate": issue_date}
-    async with session.post(f"{_api_base()}/qmatic/dates",
-                            json=payload) as resp:
-        if resp.status == 403:
-            # Corpul e complet dar ASP il refuza: seria/data emiterii nu se
-            # potrivesc cu IDNP-ul. Eroare de configurare, nu de retea.
-            raise _IdentityRejected(
-                "buletinul (serie) sau data emiterii nu corespund IDNP-ului "
-                "(verifica setarile contului folosit la scanare)")
-        if resp.status == 429:
-            # Retry-After = secunde pana la 00:00 UTC, adica pana se reseteaza
-            # cota zilnica a IDNP-ului. Il ducem mai departe ca sa dormim exact
-            # cat trebuie, in loc sa ghicim.
-            try:
-                retry_after = float(resp.headers.get("Retry-After") or 0)
-            except (TypeError, ValueError):
-                retry_after = 0.0
-            raise _RateLimited(
-                "cota zilnica de citiri ale calendarului pentru acest IDNP e "
-                "epuizata (429)", retry_after)
-        ctype = (resp.headers.get("Content-Type") or "").lower()
-        if resp.status != 200 or "text/html" in ctype:
-            body = (await resp.text())[:120]
-            raise RuntimeError(f"qmatic/dates a raspuns {resp.status}: {body!r}")
-        return await resp.json()
-
-
-# 2026-10-01: calendarul se citeste intai din gateway-ul ASP re.asp.gov.md,
-# acelasi backend QMatic peste care eservicii e doar un ambalaj. Nu cere IDNP,
-# buletin sau cerere si nu are cota zilnica pe IDNP (429), deci monitorul merge
-# fara date personale. Ruta eservicii cu identitate ramane doar rezerva.
+# 2026-10-01: calendarul se citeste din gateway-ul ASP re.asp.gov.md, acelasi
+# backend QMatic peste care eservicii e doar un ambalaj. Nu cere IDNP, buletin
+# sau cerere si nu are cota zilnica pe IDNP, deci monitorul nu foloseste date
+# personale deloc - ele raman doar pentru reprogramare. Ruta eservicii
+# (POST qmatic/dates) cerea IDNP + buletin si dadea 429 dupa o cota pe IDNP.
 # Vezi [[asp-exam-slot-capacity-and-gateway]].
 GATEWAY_BASE = "https://re.asp.gov.md/api/v1/appointments"
 
@@ -1841,23 +1729,6 @@ async def _read_calendar_gateway(session, service_hash: str, location_id: str):
     if not isinstance(data, list):
         raise RuntimeError(f"re.asp.gov.md: raspuns neasteptat {str(payload)[:120]!r}")
     return data
-
-
-async def _read_dates_any(session, gw_session, service_hash: str,
-                          location_id: str, idnp: str, seria: str,
-                          issue_date: str):
-    """Gateway-ul intai; ruta eservicii doar daca gateway-ul cade si avem
-    identitatea completa. Returneaza (zile, True daca au venit din gateway).
-    Doar citirile pe ruta eservicii consuma din cota zilnica a IDNP-ului."""
-    try:
-        return await _read_calendar_gateway(gw_session, service_hash,
-                                            location_id), True
-    except Exception as e:
-        if not (idnp and seria and issue_date):
-            raise RuntimeError(f"{e} (fara identitate pentru ruta eservicii)")
-        print(f"    [~] {e} - incerc ruta eservicii, cu identitate")
-    return await _read_calendar(session, service_hash, location_id,
-                                idnp, seria, issue_date), False
 
 
 def filter_locations(labels, selected, legacy_fallback: bool = True):
@@ -1898,28 +1769,19 @@ def days_by_month(dates, months):
 
 async def fetch_all_locations_dates(service_type: str = "PracticalExam",
                                     category: str = "BMechanical",
-                                    idnp: str = "", seria: str = "",
-                                    issue_date: str = "",
                                     only_locations=None):
-    """Toate zilele libere, la TOATE locatiile DECA Chisinau - fara browser.
+    """Toate zilele libere, la TOATE locatiile DECA Chisinau - fara browser si
+    fara date personale.
 
-    Exact API-ul pe care il apeleaza aplicatia Blazor cand alegi locatia:
-      1. GET  /apo-request/get-service/<tip>/False/<categorie>  -> hash serviciu
-      2. GET  /qmatic/locations/<hash>                          -> lista locatii
-      3. GET  re.asp.gov.md .../branches/<loc>/dates             -> zile libere
-         (rezerva: POST /qmatic/dates {publicServiceId, publicLocationId,
-          idnp, seriaAndNumber, issueDate})
-    Din 2026-10-01 pasul 3 merge pe gateway, fara date personale - vezi
-    _read_dates_any. Identitatea (idnp + serie + data emiterii) mai e folosita
-    doar daca gateway-ul cade: ruta eservicii o cere din 2026-08-17 (altfel
-    403). Raspunsul NU depinde de identitate, deci un singur scan partajat
-    ramane valid. Lunile NU se filtreaza aici (e treaba fiecarui utilizator,
-    in aval).
+      1. GET eservicii /apo-request/get-service/<tip>/False/<categorie> -> hash serviciu
+      2. GET eservicii /qmatic/locations/<hash>                         -> lista locatii
+      3. GET re.asp.gov.md .../branches/<loc>/dates                     -> zile libere
+    Pasii 1-2 sunt publici. Pasul 3 merge pe gateway din 2026-10-01, vezi
+    _read_calendar_gateway. Lunile NU se filtreaza aici (e treaba fiecarui
+    utilizator, in aval).
 
-    only_locations = etichetele pe care le urmareste macar un cont activ. Din
-    18.08.2026 conteaza: fiecare citire consuma din cota zilnica a IDNP-ului
-    (vezi _RateLimited), deci o locatie pe care n-o vrea nimeni ar taia
-    degeaba de trei ori din numarul de scanari pe zi. None/gol = toate.
+    only_locations = etichetele pe care le urmareste macar un cont activ.
+    None/gol = toate.
 
     Returneaza ({eticheta locatie: [datetime, ...]}, diagnostics).
     """
@@ -1934,32 +1796,13 @@ async def fetch_all_locations_dates(service_type: str = "PracticalExam",
         "calendar_unavailable_count": 0,
         "had_check_error": False,
         # Textul primei erori reale. Fara el alerta de pe Telegram spune doar
-        # "Eroare=DA", iar cauzele (402 de la WAF, 400 idnp, IDNP lipsa din
-        # setari, retea) arata toate la fel - vezi pana din 04.08.2026, cand
-        # diagnosticul a cerut acces la logurile Render.
+        # "Eroare=DA", iar cauzele (402 de la WAF, raspuns schimbat, retea)
+        # arata toate la fel - vezi pana din 04.08.2026, cand diagnosticul a
+        # cerut acces la logurile Render.
         "error_text": "",
-        # 2026-08-17: True cand qmatic/dates raspunde 403 fiindca identitatea
-        # (serie buletin + data emiterii) lipseste sau nu se potriveste cu
-        # IDNP-ul. E o eroare de CONFIGURARE a contului de scanare, nu o pana a
-        # site-ului si nici un blocaj de IP - se raporteaza o data, fara
-        # backoff. Vezi [[asp-qmatic-dates-gated-behind-wizard-2026-08-17]].
-        "identity_bad": False,
-        # 2026-08-18: True cand ASP a raspuns 429. Nu e o pana a site-ului,
-        # nici un blocaj de IP, nici ritmul cererilor: e COTA ZILNICA a
-        # IDNP-ului, resetata la 00:00 UTC (vezi _RateLimited). Monitorul
-        # doarme pana la resetare in loc sa strige "nu pot scana".
-        "rate_limited": False,
-        # Secunde pana la resetarea cotei (antetul Retry-After al lui ASP).
-        "retry_after": 0.0,
-        # Cate calendare am apucat sa citim cu succes pe ruta eservicii (cea cu
-        # cota pe IDNP). Din ele isi invata web.py bugetul zilnic - vezi
-        # _shared_loop. Citirile din gateway nu costa nimic si nu intra aici.
+        # Cate calendare am citit cu succes in scanul asta.
         "calendar_reads": 0,
-        "gateway_reads": 0,
     }
-    idnp = (idnp or FORM_DATA.get("idnp") or "").strip()
-    seria = (seria or FORM_DATA.get("id_series") or "").strip()
-    issue_date = (issue_date or _form_issue_date()).strip()
     results = {}
 
     try:
@@ -1992,9 +1835,7 @@ async def fetch_all_locations_dates(service_type: str = "PracticalExam",
             diagnostics["locations_found"] = len(wanted)
             print(f"  Locatii gasite: {len(wanted)}")
 
-            # Citim doar locatiile urmarite de cineva: fiecare citire costa din
-            # cota zilnica a IDNP-ului (18.08.2026), deci trei locatii inseamna
-            # de trei ori mai putine scanari pe zi decat una singura.
+            # Citim doar locatiile urmarite de cineva.
             kept = filter_locations([w["label"] for w in wanted],
                                     only_locations, legacy_fallback=False) \
                 if only_locations else None
@@ -2008,62 +1849,29 @@ async def fetch_all_locations_dates(service_type: str = "PracticalExam",
             # minute. Deci insistam pe cele ramase, in runde, pana le avem pe
             # toate sau pana se termina rundele - abia ce ramane nerezolvat
             # dupa toate rundele se raporteaza ca "calendar indisponibil".
-            # (Tiparul e vechi si la ASP: si pe vremea scanului prin browser
-            # calendarul se incarca uneori gol si trebuia reincercat.)
             for loc in wanted:
                 results[loc["label"]] = []
             pending = list(wanted)
             for round_no in range(1, _CALENDAR_ROUNDS + 1):
                 if round_no > 1:
-                    # Pauza intre runde creste: 429 se stinge daca tacem putin.
                     pause = _RATE_LIMIT_PAUSE * (round_no - 1)
                     print(f"    [i] {len(pending)} locatii necitite - "
                           f"runda {round_no}/{_CALENDAR_ROUNDS} peste {pause:.0f}s")
                     await asyncio.sleep(pause)
-                still, stop_all = [], False
+                still = []
                 for pos, loc in enumerate(pending):
-                    # Fara pauza, locatiile 2 si 3 iau 429 (vezi _RateLimited).
                     if pos or round_no > 1:
                         await asyncio.sleep(_SCAN_GAP_SECONDS)
                     try:
-                        dates, via_gw = await _read_dates_any(
-                            session, gw, service_id, loc["value"], idnp,
-                            seria, issue_date)
-                    except _IdentityRejected as e:
-                        # 2026-08-17: 403 fiindca serie buletin / data emiterii
-                        # nu valideaza pentru IDNP. Eroare de CONFIGURARE a
-                        # contului de scanare, nu o pana a site-ului si nici un
-                        # blocaj de IP - o marcam distinct ca sa nu spamam
-                        # "calendar indisponibil" si sa nu intram in backoff-ul
-                        # de "protejam IP-ul". Toate locatiile ar da acelasi
-                        # 403, deci nu are rost sa mai incercam.
-                        diagnostics["identity_bad"] = True
-                        diagnostics["had_check_error"] = True
-                        if not diagnostics["error_text"]:
-                            diagnostics["error_text"] = str(e)
-                        print(f"    [i] {loc['label']}: {e}")
-                        stop_all = True
-                        break
-                    except _RateLimited as e:
-                        # Cota e pe IDNP, nu pe locatie: daca una a luat 429,
-                        # toate celelalte iau 429, iar reincercarile din rundele
-                        # urmatoare sunt timp pierdut. Iesim si lasam monitorul
-                        # sa doarma pana la resetare.
-                        diagnostics["rate_limited"] = True
-                        diagnostics["retry_after"] = e.retry_after
-                        if not diagnostics["error_text"]:
-                            diagnostics["error_text"] = str(e)
-                        print(f"    [i] {loc['label']}: {e} "
-                              f"(reset in {e.retry_after / 3600:.1f}h)")
-                        stop_all = True
-                        break
+                        dates = await _read_calendar_gateway(gw, service_id,
+                                                             loc["value"])
                     except Exception as e:
                         loc["last_error"] = e
                         still.append(loc)
                         print(f"    [~] {loc['label']}: {e} - reincerc")
                         continue
 
-                    diagnostics["gateway_reads" if via_gw else "calendar_reads"] += 1
+                    diagnostics["calendar_reads"] += 1
                     for entry in dates or []:
                         try:
                             results[loc["label"]].append(
@@ -2077,14 +1885,10 @@ async def fetch_all_locations_dates(service_type: str = "PracticalExam",
                     else:
                         print(f"    [-] {loc['label']}: nicio zi")
                 pending = still
-                if stop_all or not pending:
+                if not pending:
                     break
 
-            # Ce n-a raspuns nici dupa toate rundele. La 429 nu numaram nimic:
-            # calendarul nu e "indisponibil", doar cota zilnica s-a terminat -
-            # altfel monitorul ar raporta o pana care nu exista (exact alertele
-            # "Calendar indisponibil=3" din 18.08.2026).
-            for loc in (pending if not diagnostics["rate_limited"] else []):
+            for loc in pending:
                 diagnostics["calendar_unavailable_count"] += 1
                 if not diagnostics["error_text"]:
                     diagnostics["error_text"] = \

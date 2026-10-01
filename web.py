@@ -40,7 +40,7 @@ import threading
 import time
 import urllib.request
 import webbrowser
-from datetime import datetime, timedelta, timezone
+from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -78,16 +78,16 @@ KNOWN_LOCATIONS = [
     "DECA Chișinău (str. Calea Ieșilor, 14)",
     "DECA Chișinău (str. Salcâmilor, 28)",
 ]
-# 2026-10-01: nume, telefon, email si adeverinta medicala erau doar pentru
-# formularul ASP din verificarea cu browser, pe care web-ul nu o foloseste.
-# Monitorul citeste calendarul fara date personale (gateway re.asp.gov.md),
-# deci nu le mai cerem si le stergem la boot din setarile salvate.
+# 2026-10-01: monitorul citeste calendarul fara date personale (gateway
+# re.asp.gov.md). Nume, telefon, email si adeverinta medicala erau doar pentru
+# formularul ASP din verificarea cu browser, pe care web-ul nu o foloseste, deci
+# le stergem la boot din setarile salvate. IDNP-ul si buletinul raman doar
+# pentru reprogramarea automata (auto_update_idnp a devenit chiar `idnp`).
 UNUSED_PERSONAL_FIELDS = ("last_name", "first_name", "phone", "email",
-                          "medical_cert")
+                          "medical_cert", "auto_update_idnp")
 
 DEFAULT_SETTINGS = {
-    # IDNP + buletin: pentru reprogramarea automata si ca rezerva pentru
-    # calendar, cand gateway-ul nu raspunde.
+    # IDNP + buletin: doar pentru reprogramarea automata.
     "idnp": "",
     "id_series": "",
     "id_date_day": 1,
@@ -101,7 +101,6 @@ DEFAULT_SETTINGS = {
     # vrea sa fie notificat.
     "scrape_locations": list(KNOWN_LOCATIONS),
     "auto_update_enabled": False,
-    "auto_update_idnp": "",
     "appointment_code": "",
     "request_number": "",
     "target_location": "",
@@ -667,6 +666,8 @@ def boot_accounts():
             print(f"[i] {name}: chat Telegram preluat din setarile vechi")
         s.pop("telegram_token", None)
         s.pop("telegram_chat_id", None)
+        if (s.get("auto_update_idnp") or "").strip():
+            s["idnp"] = s["auto_update_idnp"].strip()
         for k in UNUSED_PERSONAL_FIELDS:
             s.pop(k, None)
         u["settings"] = s
@@ -731,113 +732,9 @@ MONITOR = {"thread": None, "running": False, "stop": threading.Event(),
 MONITOR_LOCK = threading.RLock()
 
 
-# ── cota zilnica ASP ─────────────────────────────────────────────────────────
-# 18.08.2026: ASP a pus o limita pe cate ori poate citi UN IDNP calendarul
-# (POST qmatic/dates) intr-o zi. Masurat cu sonde din 3 puncte: 429 vine si de
-# acasa, la prima cerere a zilei; un ALT IDNP de pe acelasi IP primeste 403, nu
-# 429; iar Retry-After scade odata cu ceasul spre 00:00 UTC. Deci limita e pe
-# IDNP, nu pe IP, si fereastra e ziua UTC (03:00 ora Chisinaului).
-#
-# Consecinta: scanul are un numar FIX de citiri pe zi. Ce se face cu ele e o
-# ALEGERE, si utilizatorul a facut-o explicit pe 19.08.2026 ("make it work,
-# dont change the 2min time"): ramanem la intervalul cerut de el si cheltuim
-# bugetul cat tine, in loc sa-l intindem pe 24h cu scanari rare.
-# Ce castigam totusi, fara sa atingem ritmul:
-#   * o singura locatie citita (cea bifata) in loc de trei => de 3 ori mai
-#     multe cicluri din acelasi buget; la 2 minute inseamna 720 citiri/zi;
-#   * 429 nu mai e "pana": dormim pana la resetare, cu UN mesaj informativ,
-#     in loc de alerte rosii din 10 in 10 cicluri (18.08.2026, 30 la rand);
-#   * bugetul se INVATA (cate citiri a acceptat ASP), ca sa stim cat tine
-#     ritmul asta si sa i-o putem spune omului.
-# QUOTA_SPREAD=True ar imparti bugetul uniform pe fereastra (scanari mai rare,
-# dar acoperire pana seara). Lasat pe False: e decizia utilizatorului.
-QUOTA_SPREAD = False
-QUOTA_FILE = os.path.join(HERE, "quota.json")
-# Punctul de plecare, pana invata singur: pe 18.08.2026 scanul a mers de la
-# resetarea de la 03:00 pana pe la 08:50 cu 3 locatii la fiecare 2 minute -
-# adica ~500 de citiri inainte de 429. Pornim vizibil sub estimarea aia (o
-# citire la 5 minute) si urcam cu 50% pe zi cat timp nu lovim peretele.
-QUOTA_START_TARGET = 288
-QUOTA_MIN_TARGET = 12
-QUOTA_MAX_TARGET = 720       # peste asta oricum n-are rost (o citire/2 min)
-
-
-def _utc_day(ts=None):
-    return datetime.fromtimestamp(ts or time.time(), timezone.utc).strftime("%Y-%m-%d")
-
-
-def _quota_reset_at(ts=None):
-    """Momentul (epoch) urmatoarei resetari: 00:00 UTC."""
-    now = datetime.fromtimestamp(ts or time.time(), timezone.utc)
-    nxt = (now + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
-    return nxt.timestamp()
-
-
-def _quota_load():
-    try:
-        with open(QUOTA_FILE, encoding="utf-8") as f:
-            return json.load(f)
-    except Exception:
-        return {}
-
-
-def _quota_save(q):
-    try:
-        with open(QUOTA_FILE, "w", encoding="utf-8") as f:
-            json.dump(q, f, ensure_ascii=False, indent=1)
-    except Exception:
-        pass  # disc efemer pe Render: fara fisier doar reinvatam de la zero
-
-
-def quota_state():
-    """Starea cotei pentru fereastra curenta, rotita cand se schimba ziua UTC."""
-    q = MONITOR.get("quota") or _quota_load()
-    today = _utc_day()
-    if q.get("window") != today:
-        target = int(q.get("target") or QUOTA_START_TARGET)
-        # Fereastra trecuta s-a terminat fara 429 desi ne-am cheltuit tinta =>
-        # ASP accepta mai mult decat am incercat. Crestem cu 50%.
-        if q and not q.get("exhausted") and q.get("spent", 0) >= 0.9 * target:
-            target = min(int(target * 1.5), QUOTA_MAX_TARGET)
-        q = {"window": today, "spent": 0, "exhausted": False, "resume_at": 0.0,
-             "target": max(QUOTA_MIN_TARGET, target),
-             "budget": q.get("budget"),
-             "reads_per_cycle": max(1, int(q.get("reads_per_cycle") or 1))}
-        _quota_save(q)
-    MONITOR["quota"] = q
-    return q
-
-
 def enabled_users():
     with ACCOUNTS_LOCK:
         return [n for n, u in ACCOUNTS["users"].items() if u.get("monitor_enabled")]
-
-
-def scan_identity(users):
-    """Identitatea cu care interogam calendarul comun: (idnp, serie, data emiterii).
-
-    Din 2026-08-17 endpointul qmatic/dates (POST) cere IDNP + serie buletin +
-    data emiterii, altfel 403. Raspunsul NU depinde de identitate atata timp cat
-    e valida (aceleasi zile pentru toti), deci scanul ramane unul singur pentru
-    toti - luam prima identitate COMPLETA dintre conturile active (toate trei
-    campurile, ca ASP sa nu refuze scanul). issueDate = 'YYYY-MM-DDT00:00:00'.
-    """
-    for name in users:
-        s = load_settings(name)
-        idnp = (s.get("idnp") or "").strip()
-        seria = (s.get("id_series") or "").strip()
-        issue = scrapper.iso_issue_date(s.get("id_date_day"),
-                                        s.get("id_date_month"),
-                                        s.get("id_date_year"))
-        if idnp and seria and issue:
-            return idnp, seria, issue
-    # Nicio identitate completa: intoarce ce avem (idnp-ul primului) ca eroarea
-    # din scanner sa numeasca exact ce lipseste.
-    for name in users:
-        idnp = (load_settings(name).get("idnp") or "").strip()
-        if idnp:
-            return idnp, "", ""
-    return "", "", ""
 
 
 def is_enabled(name):
@@ -1039,12 +936,6 @@ async def _notify_user(name, settings, raw, scan_failed, diagnostics):
         elif not labels:
             lines.append("⚠️ Nu ai bifata nicio locatie - nu am ce sa-ti anunt.")
             lines.append("Bifeaza cel putin o locatie in interfata web.")
-        elif diagnostics.get("identity_bad"):
-            # Identitate incompleta/gresita != "nicio zi": nu putem citi, deci
-            # nu pretindem ca nu-s locuri.
-            lines.append("⚠️ Nu pot citi calendarul: IDNP + seria buletinului + "
-                         "data emiterii trebuie completate/corecte in setari.")
-            lines.append("Corecteaza-le si repornesc verificarea. 👀")
         else:
             lines.append("Nicio zi disponibila momentan.")
             lines.append(f"Te notific cand apare ceva in: {_pretty(months)}. 👀")
@@ -1221,12 +1112,7 @@ async def _first_booking_user(name, settings):
         await asyncio.to_thread(tg_send, chat, text)
 
     try:
-        dates = await scrapper.fetch_cerere_dates(
-            svc, loc, (settings.get("idnp") or "").strip(),
-            (settings.get("id_series") or "").strip(),
-            scrapper.iso_issue_date(settings.get("id_date_day"),
-                                    settings.get("id_date_month"),
-                                    settings.get("id_date_year")))
+        dates = await scrapper.fetch_cerere_dates(svc, loc)
     except Exception as e:
         ulog(name, f"  [FB] Nu am putut citi calendarul cererii: {e}")
         return
@@ -1309,117 +1195,19 @@ async def _shared_loop():
             MONITOR["stop"].set()
             break
 
-        # Cota zilnica arsa: pana la resetare (00:00 UTC) nicio cerere nu mai
-        # intoarce nimic - si nici nu amana resetarea, dar ar umple Telegramul
-        # cu "pene" inexistente. Deci dormim, pur si simplu.
-        q = quota_state()
-        if q.get("resume_at", 0) > time.time():
-            left = int(q["resume_at"] - time.time())
-            print(f"\n  [COTA] epuizata ({q.get('spent', 0)} citiri in fereastra "
-                  f"asta) - reiau peste {left // 60} min, la 00:00 UTC.")
-            await _sleep_interruptible(min(left + 5, 900))
-            continue
-
-        scan_idnp_v, scan_seria_v, scan_issue_v = scan_identity(users)
-        # Doar locatiile bifate de conturile active: fiecare citire in plus taie
-        # din numarul de scanari pe zi (vezi cota de mai sus).
+        # Doar locatiile bifate de conturile active.
         watched = []
         for _n in users:
             watched += list(load_settings(_n).get("scrape_locations") or [])
+        # Scanul nu foloseste date personale: calendarul vine din gateway-ul
+        # ASP (vezi scrapper.fetch_all_locations_dates). IDNP-ul si buletinul
+        # sunt folosite doar de reprogramarea automata.
         raw, diagnostics = await scrapper.fetch_all_locations_dates(
-            idnp=scan_idnp_v, seria=scan_seria_v, issue_date=scan_issue_v,
             only_locations=watched)
-        # 2026-08-17: qmatic/dates (POST) cere identitatea completa (serie
-        # buletin + data emiterii). Daca lipseste sau nu valideaza -> 403, ceea
-        # ce e o eroare de CONFIGURARE a contului de scanare, nu o pana a
-        # site-ului si nici un blocaj de IP - deci nu-l numaram ca esec (altfel
-        # intram in backoff-ul gresit "protejam IP-ul"), doar anuntam o data
-        # cauza. Vezi [[asp-qmatic-dates-gated-behind-wizard-2026-08-17]].
-        identity_bad = diagnostics.get("identity_bad")
-        # 2026-08-18: 429 = cota zilnica a IDNP-ului, nu o pana si nu ritmul
-        # nostru (vezi quota_state + scrapper._RateLimited). Nu se numara ca
-        # esec: altfel monitorul striga "NU POT SCANA SITE-UL" ore in sir
-        # pentru o limita perfect normala - exact alertele din 18.08.2026.
-        throttled = bool(diagnostics.get("rate_limited"))
-        reads = int(diagnostics.get("calendar_reads") or 0)
-        q["spent"] = int(q.get("spent", 0)) + reads
-        if reads:
-            q["reads_per_cycle"] = reads
-        if throttled:
-            # Cate citiri a acceptat ASP azi = bugetul real. Tinta ramane sub el,
-            # ca maine sa nu mai lovim peretele.
-            # ⚠️ Doar daca am apucat sa citim ceva in fereastra asta: la un
-            # restart pe la mijlocul zilei contorul porneste de la 0 si primul
-            # 429 ar "invata" un buget ridicol de mic, care apoi ar creste la
-            # loc cu +50% pe zi. Fara citiri proprii nu stim nimic, deci nu
-            # stricam cifra invatata.
-            if q.get("spent", 0) > 0:
-                q["budget"] = q["spent"]
-                q["target"] = max(QUOTA_MIN_TARGET, int(q["budget"] * 0.85))
-            q["exhausted"] = True
-            wait_for = diagnostics.get("retry_after") or 0
-            q["resume_at"] = (time.time() + wait_for + 60) if wait_for \
-                else _quota_reset_at() + 60
-            print(f"\n  [COTA] ASP a taiat calendarul dupa {q['spent']} citiri "
-                  f"azi. Buget invatat: {q['budget']}, tinta de maine: "
-                  f"{q['target']}. Reiau la 00:00 UTC.")
-        _quota_save(q)
-        scan_failed = (not identity_bad and not throttled
-                       and (diagnostics["had_check_error"]
-                            or diagnostics["locations_found"] == 0
-                            or diagnostics["calendar_unavailable_count"] >= 2))
+        scan_failed = (diagnostics["had_check_error"]
+                       or diagnostics["locations_found"] == 0
+                       or diagnostics["calendar_unavailable_count"] >= 2)
         MONITOR["fails"] = MONITOR["fails"] + 1 if scan_failed else 0
-        if identity_bad and not MONITOR.get("identity_notified"):
-            MONITOR["identity_notified"] = True
-            why = diagnostics.get("error_text") or "identitate incompleta"
-            print(f"\n  [i] Scanul nu poate citi calendarul: {why}")
-            id_msg = (
-                "⚠️ Monitorul nu poate citi calendarul ASP: " + why + ".\n"
-                "Calendarul principal (re.asp.gov.md) nu a raspuns, iar ruta de "
-                "rezerva cere IDNP + seria buletinului + data emiterii. "
-                "Corecteaza-le in setari, apoi reporneste monitorul.")
-            for _n in users:
-                notify_telegram(_n, id_msg)
-        elif not identity_bad:
-            MONITOR["identity_notified"] = False
-
-        if throttled:
-            # Un mesaj pe fereastra, informativ - nu alarma de pana. Textul
-            # spune explicit ca NU e blocat nimic, ca sa nu para acelasi lucru
-            # cu "MONITORUL NU POATE SCANA".
-            if not q.get("notified"):
-                q["notified"] = True
-                _quota_save(q)
-                when = datetime.fromtimestamp(q["resume_at"]).strftime("%H:%M")
-                msg = ("⏸️ <b>Cota zilnica ASP e epuizata</b>\n"
-                       f"Am citit calendarul de <b>{q['spent']}</b> ori azi - "
-                       "ASP limiteaza cate citiri poate face un IDNP intr-o zi "
-                       "(nu e o pana, nu e blocat nimic, site-ul merge).\n"
-                       f"Reiau automat la <b>{when}</b>, cand se reseteaza.\n"
-                       "⚠️ Pana atunci nu primesti notificari de locuri.\n"
-                       "💡 Daca vrei sa ajunga pana seara, se poate rari scanul "
-                       "(acum e la intervalul cerut de tine).")
-                for _n in users:
-                    notify_telegram(_n, msg)
-            if not reads:
-                # Nimic citit inainte de taiere => nimic de anuntat. Prima
-                # programare are calendarul ei (alt serviciu), deci merge mai
-                # departe chiar daca scanul comun a ramas fara cota.
-                for _n in users:
-                    _s = load_settings(_n)
-                    if _s.get("first_booking_enabled"):
-                        try:
-                            await _first_booking_user(_n, _s)
-                        except Exception as e:
-                            print(f"[!] Eroare la prima programare ({_n}): {e}")
-                await _sleep_interruptible(
-                    min(max(60, int(q["resume_at"] - time.time())) + 5, 900))
-                continue
-            # Altfel am apucat sa citim o parte din locatii inainte de taiere:
-            # zilele alea sunt reale si trebuie anuntate (si eventual prinse de
-            # auto-update) ACUM, nu pierdute fiindca urmatoarea locatie a dat
-            # 429. Deci mergem mai departe pe traseul normal si abia la final
-            # dormim pana la resetare.
 
         intervals = []
         for name in users:
@@ -1449,35 +1237,6 @@ async def _shared_loop():
         # la rand = probabil blocati de WAF/site cazut, verificarile dese doar
         # prelungesc blocarea.
         wait_minutes = min(intervals) if intervals else 5
-        # Ritmul ramane cel cerut de utilizator (QUOTA_SPREAD=False). Cat mai
-        # tine bugetul la ritmul asta ii spunem in log, ca sa nu fie surpriza
-        # cand tace: e o cifra, nu o pana.
-        per_cycle = max(1, int(q.get("reads_per_cycle") or 1))
-        secs_left = max(60.0, _quota_reset_at() - time.time())
-        if QUOTA_SPREAD:
-            # Varianta "acoperire pana seara": citirile ramase, impartite
-            # uniform pe cat a mai ramas din fereastra.
-            reads_left = int(q.get("target") or QUOTA_START_TARGET) - int(q.get("spent", 0))
-            if reads_left <= 0:
-                q["resume_at"] = _quota_reset_at() + 60
-                _quota_save(q)
-                print(f"\n  [COTA] tinta de {q.get('target')} citiri s-a "
-                      f"incheiat fara 429 - astept resetarea.")
-                wait_minutes = 1
-            else:
-                paced = (secs_left / max(1.0, reads_left / per_cycle)) / 60.0
-                if paced > wait_minutes:
-                    print(f"\n  [COTA] {reads_left} citiri ramase pentru "
-                          f"{secs_left / 3600:.1f}h -> scan la {paced:.0f} min.")
-                    wait_minutes = paced
-        elif q.get("budget"):
-            burn = max(0, int(q["budget"]) - int(q.get("spent", 0)))
-            hours = (burn / per_cycle) * wait_minutes / 60.0
-            print(f"\n  [COTA] {q['spent']}/{q['budget']} citiri folosite azi - "
-                  f"la {wait_minutes} min ajunge inca ~{hours:.1f}h.")
-        if throttled:
-            # Am anuntat ce am apucat sa citim; de aici incolo cota e arsa.
-            wait_minutes = min(max(1.0, (q["resume_at"] - time.time()) / 60.0), 15)
         if MONITOR["fails"] >= 3:
             wait_minutes = max(wait_minutes, 15)
             print(f"\n  [BACKOFF] {MONITOR['fails']} scanari esuate la rand - "

@@ -96,18 +96,8 @@
   <div class="panel">
     <h2>SETARI</h2>
     <div class="scroll">
-      <div class="hint">Monitorul citeste calendarul fara date personale. IDNP-ul si buletinul
-        trebuie doar pentru reprogramarea automata si ca rezerva, daca ASP schimba ceva.</div>
-      <label>IDNP</label>
-      <input type="text" id="idnp" placeholder="Ex: 1234567890123">
-      <label>Seria/Nr. buletin</label>
-      <input type="text" id="id_series" placeholder="Ex: A12345678">
-      <label>Data buletin (zi / luna / an)</label>
-      <div class="row small">
-        <div><input type="text" id="id_date_day" placeholder="ZZ"></div>
-        <div><input type="text" id="id_date_month" placeholder="LL"></div>
-        <div><input type="text" id="id_date_year" placeholder="AAAA"></div>
-      </div>
+      <div class="hint">Monitorul citeste calendarul fara date personale. Le ceri doar la
+        auto-update, mai jos, ca sa te poata reprograma.</div>
 
       <div class="divider">TELEGRAM</div>
       <div id="tgBox" class="tgbox"></div>
@@ -127,8 +117,17 @@
       <div class="divider">AUTO-UPDATE PROGRAMARE</div>
       <label class="check"><input type="checkbox" id="auto_update_enabled">
         Activeaza auto-update programare</label>
-      <label>IDNP auto-update (gol = la fel ca scraping)</label>
-      <input type="text" id="auto_update_idnp" placeholder="Lasa gol pentru IDNP-ul de mai sus">
+      <div class="hint">Datele de mai jos sunt folosite doar ca sa te reprogramez.</div>
+      <label>IDNP</label>
+      <input type="text" id="idnp" placeholder="Ex: 1234567890123">
+      <label>Seria/Nr. buletin</label>
+      <input type="text" id="id_series" placeholder="Ex: A12345678">
+      <label>Data buletin (zi / luna / an)</label>
+      <div class="row small">
+        <div><input type="text" id="id_date_day" placeholder="ZZ"></div>
+        <div><input type="text" id="id_date_month" placeholder="LL"></div>
+        <div><input type="text" id="id_date_year" placeholder="AAAA"></div>
+      </div>
       <label>Codul programarii (APO...)</label>
       <input type="text" id="appointment_code" placeholder="APO0126...">
       <label>Numarul cererii</label>
@@ -271,8 +270,7 @@ document.getElementById("auth_pass").addEventListener("keydown",
   e => { if(e.key === "Enter") submitAuth(); });
 
 const $ = id => document.getElementById(id);
-const TEXT_FIELDS = ["idnp","id_series","auto_update_idnp","appointment_code",
-  "request_number"];
+const TEXT_FIELDS = ["idnp","id_series","appointment_code","request_number"];
 
 // ── Telegram: bot comun, contul se leaga printr-un /start cu cod ──
 let tgLinked = false;
