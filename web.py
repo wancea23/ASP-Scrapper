@@ -78,17 +78,21 @@ KNOWN_LOCATIONS = [
     "DECA Chișinău (str. Calea Ieșilor, 14)",
     "DECA Chișinău (str. Salcâmilor, 28)",
 ]
+# 2026-10-01: nume, telefon, email si adeverinta medicala erau doar pentru
+# formularul ASP din verificarea cu browser, pe care web-ul nu o foloseste.
+# Monitorul citeste calendarul fara date personale (gateway re.asp.gov.md),
+# deci nu le mai cerem si le stergem la boot din setarile salvate.
+UNUSED_PERSONAL_FIELDS = ("last_name", "first_name", "phone", "email",
+                          "medical_cert")
+
 DEFAULT_SETTINGS = {
+    # IDNP + buletin: pentru reprogramarea automata si ca rezerva pentru
+    # calendar, cand gateway-ul nu raspunde.
     "idnp": "",
-    "last_name": "",
-    "first_name": "",
-    "phone": "",
-    "email": "",
     "id_series": "",
     "id_date_day": 1,
     "id_date_month": 1,
     "id_date_year": 2020,
-    "medical_cert": "",
     # Telegram nu mai e in setari: botul e comun (TG_TOKEN) si chat-ul fiecarui
     # cont se leaga prin /start in bot (vezi ACCOUNTS["users"][name]["tg_chat"]).
     "interval_minutes": 5,
@@ -663,6 +667,8 @@ def boot_accounts():
             print(f"[i] {name}: chat Telegram preluat din setarile vechi")
         s.pop("telegram_token", None)
         s.pop("telegram_chat_id", None)
+        for k in UNUSED_PERSONAL_FIELDS:
+            s.pop(k, None)
         u["settings"] = s
     # scrie fisierele per-utilizator (hot-reload-ul scrapper-ului citeste de acolo)
     for name, u in ACCOUNTS["users"].items():
@@ -1216,7 +1222,11 @@ async def _first_booking_user(name, settings):
 
     try:
         dates = await scrapper.fetch_cerere_dates(
-            svc, loc, (settings.get("idnp") or "").strip())
+            svc, loc, (settings.get("idnp") or "").strip(),
+            (settings.get("id_series") or "").strip(),
+            scrapper.iso_issue_date(settings.get("id_date_day"),
+                                    settings.get("id_date_month"),
+                                    settings.get("id_date_year")))
     except Exception as e:
         ulog(name, f"  [FB] Nu am putut citi calendarul cererii: {e}")
         return
@@ -1365,9 +1375,9 @@ async def _shared_loop():
             print(f"\n  [i] Scanul nu poate citi calendarul: {why}")
             id_msg = (
                 "⚠️ Monitorul nu poate citi calendarul ASP: " + why + ".\n"
-                "Calendarul cere acum IDNP + seria buletinului + data emiterii "
-                "(din 17.08.2026). Completeaza-le/corecteaza-le in setari, apoi "
-                "reporneste monitorul.")
+                "Calendarul principal (re.asp.gov.md) nu a raspuns, iar ruta de "
+                "rezerva cere IDNP + seria buletinului + data emiterii. "
+                "Corecteaza-le in setari, apoi reporneste monitorul.")
             for _n in users:
                 notify_telegram(_n, id_msg)
         elif not identity_bad:

@@ -1244,16 +1244,20 @@ async def fetch_cerere_dates(service_hash: str, location_id: str, idnp: str = ""
     2026-08-17: `qmatic/dates` cere identitatea completa in corp (serie buletin
     + data emiterii) - vezi _read_calendar. Convertim un refuz intr-un
     RuntimeError clar ca apelantii care prind Exception sa vada cauza reala.
+    2026-10-01: citim intai din gateway, fara identitate - vezi _read_dates_any.
     """
     idnp = (idnp or FORM_DATA.get("idnp") or "").strip()
     seria = (seria or FORM_DATA.get("id_series") or "").strip()
     issue_date = (issue_date or _form_issue_date()).strip()
     timeout = aiohttp.ClientTimeout(total=30)
     async with aiohttp.ClientSession(timeout=timeout,
-                                     headers=_api_headers()) as session:
+                                     headers=_api_headers()) as session, \
+            aiohttp.ClientSession(timeout=timeout,
+                                  headers=_gateway_headers()) as gw:
         try:
-            payload = await _read_calendar(session, service_hash,
-                                           location_id, idnp, seria, issue_date)
+            payload, _ = await _read_dates_any(session, gw, service_hash,
+                                               location_id, idnp, seria,
+                                               issue_date)
         except _IdentityRejected as e:
             raise RuntimeError(str(e))
     out = []
@@ -1810,6 +1814,52 @@ async def _read_calendar(session, service_hash: str, location_id: str,
         return await resp.json()
 
 
+# 2026-10-01: calendarul se citeste intai din gateway-ul ASP re.asp.gov.md,
+# acelasi backend QMatic peste care eservicii e doar un ambalaj. Nu cere IDNP,
+# buletin sau cerere si nu are cota zilnica pe IDNP (429), deci monitorul merge
+# fara date personale. Ruta eservicii cu identitate ramane doar rezerva.
+# Vezi [[asp-exam-slot-capacity-and-gateway]].
+GATEWAY_BASE = "https://re.asp.gov.md/api/v1/appointments"
+
+
+def _gateway_headers():
+    # Fara cheia releului: ea e pentru Worker-ul nostru, nu pentru ASP.
+    return {"User-Agent": _API_UA, "Accept": "application/json"}
+
+
+async def _read_calendar_gateway(session, service_hash: str, location_id: str):
+    """Zilele libere la o locatie, din gateway, fara identitate.
+    Raspunsul e {"meta": {...}, "data": [{date, timeSlots}, ...]}."""
+    url = (f"{GATEWAY_BASE}/branches/{location_id}/dates"
+           f"?servicePublicId={service_hash}&additionalUnits=0")
+    async with session.get(url) as resp:
+        if resp.status != 200:
+            body = (await resp.text())[:120]
+            raise RuntimeError(f"re.asp.gov.md a raspuns {resp.status}: {body!r}")
+        payload = await resp.json(content_type=None)
+    data = payload.get("data") if isinstance(payload, dict) else None
+    if not isinstance(data, list):
+        raise RuntimeError(f"re.asp.gov.md: raspuns neasteptat {str(payload)[:120]!r}")
+    return data
+
+
+async def _read_dates_any(session, gw_session, service_hash: str,
+                          location_id: str, idnp: str, seria: str,
+                          issue_date: str):
+    """Gateway-ul intai; ruta eservicii doar daca gateway-ul cade si avem
+    identitatea completa. Returneaza (zile, True daca au venit din gateway).
+    Doar citirile pe ruta eservicii consuma din cota zilnica a IDNP-ului."""
+    try:
+        return await _read_calendar_gateway(gw_session, service_hash,
+                                            location_id), True
+    except Exception as e:
+        if not (idnp and seria and issue_date):
+            raise RuntimeError(f"{e} (fara identitate pentru ruta eservicii)")
+        print(f"    [~] {e} - incerc ruta eservicii, cu identitate")
+    return await _read_calendar(session, service_hash, location_id,
+                                idnp, seria, issue_date), False
+
+
 def filter_locations(labels, selected, legacy_fallback: bool = True):
     """Pastreaza doar locatiile alese de utilizator (potrivire fara diacritice).
 
@@ -1856,14 +1906,15 @@ async def fetch_all_locations_dates(service_type: str = "PracticalExam",
     Exact API-ul pe care il apeleaza aplicatia Blazor cand alegi locatia:
       1. GET  /apo-request/get-service/<tip>/False/<categorie>  -> hash serviciu
       2. GET  /qmatic/locations/<hash>                          -> lista locatii
-      3. POST /qmatic/dates {publicServiceId, publicLocationId, idnp,
-              seriaAndNumber, issueDate}                         -> zile libere
-    Din 2026-08-17 pasul 3 e POST si cere IDENTITATEA completa (serie buletin +
-    data emiterii), altfel 403 - vezi _read_calendar. Raspunsul NU depinde de
-    identitate atata timp cat e valida (aceleasi zile pentru toti), deci un
-    singur scan partajat ramane valid: folosim identitatea primului cont activ
-    care o are completa. Lunile NU se filtreaza aici (e treaba fiecarui
-    utilizator, in aval).
+      3. GET  re.asp.gov.md .../branches/<loc>/dates             -> zile libere
+         (rezerva: POST /qmatic/dates {publicServiceId, publicLocationId,
+          idnp, seriaAndNumber, issueDate})
+    Din 2026-10-01 pasul 3 merge pe gateway, fara date personale - vezi
+    _read_dates_any. Identitatea (idnp + serie + data emiterii) mai e folosita
+    doar daca gateway-ul cade: ruta eservicii o cere din 2026-08-17 (altfel
+    403). Raspunsul NU depinde de identitate, deci un singur scan partajat
+    ramane valid. Lunile NU se filtreaza aici (e treaba fiecarui utilizator,
+    in aval).
 
     only_locations = etichetele pe care le urmareste macar un cont activ. Din
     18.08.2026 conteaza: fiecare citire consuma din cota zilnica a IDNP-ului
@@ -1900,33 +1951,23 @@ async def fetch_all_locations_dates(service_type: str = "PracticalExam",
         "rate_limited": False,
         # Secunde pana la resetarea cotei (antetul Retry-After al lui ASP).
         "retry_after": 0.0,
-        # Cate calendare am apucat sa citim cu succes in scanul asta. Din ele
-        # isi invata web.py bugetul zilnic - vezi _shared_loop.
+        # Cate calendare am apucat sa citim cu succes pe ruta eservicii (cea cu
+        # cota pe IDNP). Din ele isi invata web.py bugetul zilnic - vezi
+        # _shared_loop. Citirile din gateway nu costa nimic si nu intra aici.
         "calendar_reads": 0,
+        "gateway_reads": 0,
     }
     idnp = (idnp or FORM_DATA.get("idnp") or "").strip()
     seria = (seria or FORM_DATA.get("id_series") or "").strip()
     issue_date = (issue_date or _form_issue_date()).strip()
     results = {}
 
-    # Identitate incompleta = eroare de configurare, nu o pana a site-ului:
-    # calendarul cere idnp + serie buletin + data emiterii (din 2026-08-17).
-    # O marcam o singura data, nu ca 3 calendare indisponibile la rand.
-    missing = [n for n, v in (("IDNP", idnp), ("serie buletin", seria),
-                              ("data emiterii", issue_date)) if not v]
-    if missing:
-        diagnostics["had_check_error"] = True
-        diagnostics["identity_bad"] = True
-        diagnostics["error_text"] = (
-            "contul de scanare nu are completat: " + ", ".join(missing)
-            + " (calendarul ASP le cere pe toate din 17.08.2026)")
-        print(f"  EROARE: {diagnostics['error_text']}")
-        return {}, diagnostics
-
     try:
         timeout = aiohttp.ClientTimeout(total=60)
         async with aiohttp.ClientSession(timeout=timeout,
-                                         headers=_api_headers()) as session:
+                                         headers=_api_headers()) as session, \
+                aiohttp.ClientSession(timeout=timeout,
+                                      headers=_gateway_headers()) as gw:
             svc_url = (f"{_api_base()}/apo-request/get-service/"
                        f"{service_type}/False/{category}")
             async with session.get(svc_url) as resp:
@@ -1985,9 +2026,9 @@ async def fetch_all_locations_dates(service_type: str = "PracticalExam",
                     if pos or round_no > 1:
                         await asyncio.sleep(_SCAN_GAP_SECONDS)
                     try:
-                        dates = await _read_calendar(session, service_id,
-                                                     loc["value"], idnp, seria,
-                                                     issue_date)
+                        dates, via_gw = await _read_dates_any(
+                            session, gw, service_id, loc["value"], idnp,
+                            seria, issue_date)
                     except _IdentityRejected as e:
                         # 2026-08-17: 403 fiindca serie buletin / data emiterii
                         # nu valideaza pentru IDNP. Eroare de CONFIGURARE a
@@ -2022,7 +2063,7 @@ async def fetch_all_locations_dates(service_type: str = "PracticalExam",
                         print(f"    [~] {loc['label']}: {e} - reincerc")
                         continue
 
-                    diagnostics["calendar_reads"] += 1
+                    diagnostics["gateway_reads" if via_gw else "calendar_reads"] += 1
                     for entry in dates or []:
                         try:
                             results[loc["label"]].append(
