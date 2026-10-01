@@ -225,7 +225,7 @@ class ASPCheckerApp(ctk.CTk):
         self.id_date_year_entry.pack(side="left")
 
         # Certificat medical
-        ctk.CTkLabel(scrollable, text="Certificat medical:", font=("Arial", 10)).pack(anchor="w", padx=10, pady=(10, 2))
+        ctk.CTkLabel(scrollable, text="Certificat medical (optional):", font=("Arial", 10)).pack(anchor="w", padx=10, pady=(10, 2))
         self.medical_cert_entry = ctk.CTkEntry(scrollable, placeholder_text="Ex: 12345/6789")
         self.medical_cert_entry.pack(fill="x", padx=10, pady=(0, 10))
 

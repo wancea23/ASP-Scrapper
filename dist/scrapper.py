@@ -1536,12 +1536,22 @@ async def do_check(page):
         print("  Astept dupa data (3s)...")
         await page.wait_for_timeout(3000)
 
-        await page.wait_for_selector('input[name="MedicalCertificateNumber"]', timeout=20000)
-        await page.fill('input[name="MedicalCertificateNumber"]', FORM_DATA["medical_cert"])
-        await page.locator('input[name="MedicalCertificateNumber"]').press("Tab")
-
-        print("  Astept dupa adeverinta (3s)...")
-        await page.wait_for_timeout(3000)
+        # Din 2026-10 ASP verifica adeverinta medicala singur, dupa IDNP
+        # (POST apo-request/validate-medical-certificate). Daca o gaseste,
+        # campul nu mai apare si formularul trece direct la RequestType.
+        # Campul apare doar cand verificarea esueaza (ex. "No_connection").
+        med = 'input[name="MedicalCertificateNumber"]'
+        await page.wait_for_selector(f'{med}, select[name="RequestType"]', timeout=20000)
+        if await page.locator(med).is_visible():
+            if not FORM_DATA.get("medical_cert"):
+                raise RuntimeError("site-ul cere adeverinta medicala, dar campul "
+                                   "'Certificat medical' e gol in setari")
+            await page.fill(med, FORM_DATA["medical_cert"])
+            await page.locator(med).press("Tab")
+            print("  Astept dupa adeverinta (3s)...")
+            await page.wait_for_timeout(3000)
+        else:
+            print("  Adeverinta medicala verificata automat de ASP")
 
         await page.wait_for_selector('select[name="RequestType"]', timeout=10000)
         await page.select_option('select[name="RequestType"]', FORM_DATA["service_type"])
